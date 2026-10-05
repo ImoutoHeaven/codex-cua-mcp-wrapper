@@ -170,7 +170,7 @@ async function main() {
               message.result.tools = message.result.tools.filter(t => allowed.has(t.name));
             }
             if (method === 'initialize' && message.result) {
-              message.result.instructions = (message.result.instructions || '') + '\n' + hint +
+              message.result.instructions = (message.result.instructions || '') +
                 '\nUse js for Windows computer operations. Confirmation uses a local Windows dialog. The user can approve once, allow all app access for this connection, or explicitly select YOLO for supported Computer Use confirmations. Session choices reset on reconnect. Unsupported forms are cancelled. ' +
                 'This wrapper does not install Codex turn hooks; end/reset the session when work is interrupted. Never retry failed input automatically.';
             }

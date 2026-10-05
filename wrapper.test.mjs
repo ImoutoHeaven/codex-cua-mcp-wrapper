@@ -62,6 +62,7 @@ test('discovers newest usable version, relays MCP, filters tools and explains na
   const run={stdout};
   const replies=new Map(stdout.trim().split('\n').map(s=>{const q=JSON.parse(s);return[q.id,q];}));
   assert.equal(replies.get(1).result.serverInfo.name,'26.10.1');
+  assert.doesNotMatch(replies.get(1).result.instructions,/请启动 ChatGPT Desktop/);
   assert.deepEqual(replies.get(2).result.tools.map(t=>t.name),['js','js_reset','turn_ended']);
   const value=JSON.parse(replies.get(3).result.content[0].text);
   assert.equal(value.surface,'computer');assert.equal(value.sky,'@oai/sky/service');assert.equal(value.value,'中文\u2028ok');
