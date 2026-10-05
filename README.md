@@ -51,7 +51,7 @@ await cua.getState();
 
 Select the exact target window, operate it, and verify the result from fresh app state or a screenshot. After cancellation, observe again before retrying input.
 
-Allow more than 45 seconds for confirmation in both the MCP tool timeout and any outer execution timeout. Send `turn_ended` or reset the JS session when a task ends or is interrupted; clients manage these lifecycle calls.
+Allow more than 45 seconds for confirmation in both the MCP tool timeout and any outer execution timeout. Send `turn_ended` or reset the JS session when a task ends or is interrupted; clients manage these lifecycle calls, and the local Computer Use indication stays until they arrive.
 
 If the local pipe fails, start Desktop, enable Computer Use, and reconnect MCP to refresh its configuration.
 

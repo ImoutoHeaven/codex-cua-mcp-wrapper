@@ -172,7 +172,7 @@ async function main() {
             if (method === 'initialize' && message.result) {
               message.result.instructions = (message.result.instructions || '') +
                 '\nUse js for Windows computer operations. Confirmation uses a local Windows dialog. The user can approve once, allow all app access for this connection, or explicitly select YOLO for supported Computer Use confirmations. Session choices reset on reconnect. Unsupported forms are cancelled. ' +
-                'This wrapper does not install Codex turn hooks; end/reset the session when work is interrupted. Never retry failed input automatically.';
+                'This wrapper does not install Codex turn hooks and nothing else here detects the end of a turn. End every turn that used computer control by calling turn_ended and js_reset, so the local Computer Use indication does not outlive the work. Never retry failed input automatically.';
             }
             if (message.result?.isError && pipeFailure.test((message.result.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n'))) {
               message.result.content.push({ type: 'text', text: hint });
