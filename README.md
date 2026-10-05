@@ -34,12 +34,12 @@ The wrapper discovers the newest complete `unified-computer-use` plugin under `C
 
 Choose in the local confirmation dialog:
 
+- **Decline:** leave the request unauthorized.
 - **Allow once:** accept the current request.
-- **Allow all apps:** reuse recognized low-risk app-access approvals for this connection.
+- **Allow this app:** accept, and reuse the approval for low-risk access to the same app for this connection.
 - **YOLO:** automatically accept supported Computer Use confirmations for this connection, including higher-risk requests. Use only for trusted tasks.
-- **Decline / Cancel:** leave the request unauthorized.
 
-Enter, Escape, closing the dialog, and its 45-second timeout cancel. Unsupported forms also cancel. Reconnecting clears session approvals; `js_reset` keeps them. Windows permission boundaries still apply.
+After a 15-second countdown, the dialog applies its default: **Allow this app**, or **Decline** when the request is not low-risk app access. Enter selects the default. Escape and closing the dialog cancel. Unsupported forms also cancel. Reconnecting clears session approvals; `js_reset` keeps them. Windows permission boundaries still apply.
 
 ## Use
 
@@ -51,7 +51,7 @@ await cua.getState();
 
 Select the exact target window, operate it, and verify the result from fresh app state or a screenshot. After cancellation, observe again before retrying input.
 
-Allow more than 45 seconds for confirmation in both the MCP tool timeout and any outer execution timeout. Send `turn_ended` or reset the JS session when a task ends or is interrupted; clients manage these lifecycle calls, and the local Computer Use indication stays until they arrive.
+Allow 45 seconds for confirmation in both the MCP tool timeout and any outer execution timeout. Send `turn_ended` or reset the JS session when a task ends or is interrupted; clients manage these lifecycle calls, and the local Computer Use indication stays until they arrive.
 
 If the local pipe fails, start Desktop, enable Computer Use, and reconnect MCP to refresh its configuration.
 

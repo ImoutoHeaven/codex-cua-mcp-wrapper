@@ -18,7 +18,7 @@ for await (const chunk of process.stdin) {
  let result;
  if(q.method==='initialize') {
   result={protocolVersion:'2024-11-05',capabilities:{tools:{}},serverInfo:{name:process.env.FIXTURE_VERSION,version:'1',clientCapabilities:q.params?.capabilities}};
-  process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:'host-approval',method:'elicitation/create',params:{message:process.env.FIXTURE_CONFIRM ? '自动测试：请勿点击。窗口显示后会自动取消，不会访问应用。' : 'Approve?',requestedSchema:process.env.FIXTURE_CONFIRM ? {type:'object',properties:{}} : {type:'object'}}})+'\\n');
+  process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:'host-approval',method:'elicitation/create',params:{message:process.env.FIXTURE_CONFIRM ? 'Automated test: do not click. The dialog cancels itself once visible and accesses no app.' : 'Approve?',requestedSchema:process.env.FIXTURE_CONFIRM ? {type:'object',properties:{}} : {type:'object'}}})+'\\n');
  }
  else if(!q.method) result={received:q.result};
  else if(q.method==='tools/list') result={tools:['js','js_reset','turn_ended','js_add_node_module_dir'].map(name=>({name,inputSchema:{type:'object'}}))};
@@ -41,7 +41,7 @@ test('discovers newest usable version, relays MCP, filters tools and explains na
   const requests=[
    {id:1,method:'initialize',params:{}},
    {id:2,method:'tools/list'},
-   {id:3,method:'tools/call',params:{name:'js',arguments:{code:'中文\u2028ok'}}},
+   {id:3,method:'tools/call',params:{name:'js',arguments:{code:'naïve ✓\u2028ok'}}},
    {id:4,method:'tools/call',params:{name:'js',arguments:{code:'pipe'}}},
    {id:5,method:'tools/call',params:{name:'js_add_node_module_dir',arguments:{path:'no'}}},
    {id:6,method:'tools/call',params:{name:'turn_ended',arguments:{hook_event_name:'Stop',session_id:'s',turn_id:'t'}}},
@@ -62,12 +62,12 @@ test('discovers newest usable version, relays MCP, filters tools and explains na
   const run={stdout};
   const replies=new Map(stdout.trim().split('\n').map(s=>{const q=JSON.parse(s);return[q.id,q];}));
   assert.equal(replies.get(1).result.serverInfo.name,'26.10.1');
-  assert.doesNotMatch(replies.get(1).result.instructions,/请启动 ChatGPT Desktop/);
+  assert.doesNotMatch(replies.get(1).result.instructions,/Start ChatGPT Desktop/);
   assert.deepEqual(replies.get(2).result.tools.map(t=>t.name),['js','js_reset','turn_ended']);
   const value=JSON.parse(replies.get(3).result.content[0].text);
-  assert.equal(value.surface,'computer');assert.equal(value.sky,'@oai/sky/service');assert.equal(value.value,'中文\u2028ok');
+  assert.equal(value.surface,'computer');assert.equal(value.sky,'@oai/sky/service');assert.equal(value.value,'naïve ✓\u2028ok');
   assert.equal(replies.get(4).result.isError,true);
-  assert.match(replies.get(4).result.content.map(c=>c.text).join('\n'),/请启动 ChatGPT Desktop/);
+  assert.match(replies.get(4).result.content.map(c=>c.text).join('\n'),/Start ChatGPT Desktop/);
   assert.ok(replies.get(5).error);
   assert.ok(replies.get(6).result);
   assert.deepEqual(replies.get(1).result.serverInfo.clientCapabilities.elicitation,{form:{}});
@@ -112,6 +112,6 @@ test('missing desktop installation fails explicitly without stdout pollution', (
   const run=spawnSync(process.execPath,[wrapper],{env:{...process.env,CODEX_HOME:home},input:'',encoding:'utf8',timeout:10000});
   assert.equal(run.status,1);
   assert.equal(run.stdout,'');
-  assert.match(run.stderr,/请启动 ChatGPT Desktop/);
+  assert.match(run.stderr,/Start ChatGPT Desktop/);
  } finally {rmSync(home,{recursive:true,force:true});}
 });

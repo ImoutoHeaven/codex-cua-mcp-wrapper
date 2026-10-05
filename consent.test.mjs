@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isAccessConfirmation, isApplicationAccessConfirmation, canReuseApproval, parseChoice, requestConsent } from './consent.mjs';
+import { isAccessConfirmation, isApplicationAccessConfirmation, canReuseApproval, rememberApproval, parseChoice, requestConsent } from './consent.mjs';
 
 const form = { mode: 'form', message: 'Allow Codex to use calc?', requestedSchema: { type: 'object', properties: {} }, _meta: { connector_id: 'computer-use', codex_approval_kind: 'mcp_tool_call', riskLevel:'low', tool_params: { app: 'calc.exe' } } };
 
@@ -19,11 +19,20 @@ test('only explicit local button choices produce accept; closing, failure and ma
  }
 });
 
-test('allow-all requires an explicit choice and applies only to identified low-risk app access', () => {
+const fresh = () => ({yolo:false,apps:new Set()});
+const forApp = app => ({...form,_meta:{...form._meta,tool_params:{app}}});
+
+test('allow-same-app is reused only for the approved app\'s low-risk access', () => {
  assert.equal(isApplicationAccessConfirmation(form),true);
- assert.deepEqual(parseChoice('accept_all',0,{apps:true}),{action:'accept',content:{},scope:'apps'});
- assert.deepEqual(parseChoice('accept_all',0),{action:'cancel'});
- assert.deepEqual(parseChoice('accept_all',1,{apps:true}),{action:'cancel'});
+ assert.deepEqual(parseChoice('accept_app',0,{app:true}),{action:'accept',content:{},scope:'app'});
+ assert.deepEqual(parseChoice('accept_app',0),{action:'cancel'});
+ assert.deepEqual(parseChoice('accept_app',1,{app:true}),{action:'cancel'});
+ const approvals = fresh();
+ assert.equal(canReuseApproval(approvals,form),false);
+ rememberApproval(approvals,'app',form);
+ assert.equal(canReuseApproval(approvals,forApp('CALC.EXE')),true);
+ assert.equal(canReuseApproval(approvals,forApp('notepad.exe')),false);
+ assert.equal(canReuseApproval(approvals,{...form,_meta:{...form._meta,riskLevel:'high'}}),false);
  for(const meta of [undefined,{...form._meta,connector_id:'other'},{...form._meta,riskLevel:'high'}, {...form._meta,tool_params:{app:'calc.exe',permission:'other'}}, {...form._meta,tool_params:{app:''}}]) {
   assert.equal(isApplicationAccessConfirmation({...form,_meta:meta}),false);
  }
@@ -33,13 +42,12 @@ test('YOLO is explicitly selected and reused only within supported computer-use 
  assert.deepEqual(parseChoice('yolo',0,{yolo:true}),{action:'accept',content:{},scope:'yolo'});
  assert.deepEqual(parseChoice('yolo',0),{action:'cancel'});
  assert.deepEqual(parseChoice('yolo',1,{yolo:true}),{action:'cancel'});
- assert.equal(canReuseApproval(null,form),false);
- assert.equal(canReuseApproval('apps',form),true);
+ const approvals = fresh();
+ rememberApproval(approvals,'yolo',form);
  const higherRisk={...form,_meta:{...form._meta,riskLevel:'high',tool_params:{app:'calc.exe',operation:'other'}}};
- assert.equal(canReuseApproval('apps',higherRisk),false);
- assert.equal(canReuseApproval('yolo',higherRisk),true);
- assert.equal(canReuseApproval('yolo',{...form,_meta:{connector_id:'other'}}),false);
- assert.equal(canReuseApproval('yolo',{...form,requestedSchema:{type:'object',properties:{secret:{type:'string'}}}}),false);
+ assert.equal(canReuseApproval(approvals,higherRisk),true);
+ assert.equal(canReuseApproval(approvals,{...form,_meta:{connector_id:'other'}}),false);
+ assert.equal(canReuseApproval(approvals,{...form,requestedSchema:{type:'object',properties:{secret:{type:'string'}}}}),false);
 });
 
 test('unsupported forms and pre-cancelled calls never open a dialog', async () => {
@@ -51,6 +59,6 @@ test('unsupported forms and pre-cancelled calls never open a dialog', async () =
 test('cancelling a live native confirmation closes it without authorizing', {skip:process.platform!=='win32' || process.env.CUA_WRAPPER_GUI_TESTS!=='1'}, async () => {
  const controller=new AbortController();
  const timer=setTimeout(()=>controller.abort(),1500);
- try {assert.deepEqual(await requestConsent({...form,message:'测试：自动取消验证。无需点击，不会访问应用。'},controller.signal),{action:'cancel'});}
+ try {assert.deepEqual(await requestConsent({...form,message:'Test: automatic cancellation. No click needed; no app is accessed.'},controller.signal),{action:'cancel'});}
  finally {clearTimeout(timer);}
 });

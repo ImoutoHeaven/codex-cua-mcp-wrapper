@@ -4,9 +4,9 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { isAccessConfirmation, canReuseApproval, requestConsent } from './consent.mjs';
+import { isAccessConfirmation, canReuseApproval, rememberApproval, requestConsent } from './consent.mjs';
 
-const hint = '本地 Computer Use 管道不可用。请启动 ChatGPT Desktop；若使用 Codex Desktop，请启动它并启用 Computer Use，然后在 MCP 客户端重新连接此服务，以读取最新管道配置。';
+const hint = 'The local Computer Use pipe is unavailable. Start ChatGPT Desktop (or Codex Desktop with Computer Use enabled), then reconnect this server in the MCP client to load the current pipe configuration.';
 const pipeFailure = /(?:native pipe|named pipe).*(?:unavailable|timed out|closed|failed|not found)|failed to connect native pipe/i;
 const knownTools = new Set(['js', 'js_reset', 'turn_ended']);
 const home = process.env.CODEX_HOME || join(homedir(), '.codex');
@@ -19,7 +19,7 @@ function discover() {
     versions = readdirSync(root, { withFileTypes: true }).filter(d => d.isDirectory() && /^\d+(?:\.\d+)+$/.test(d.name))
       .map(d => d.name).sort((a, b) => b.localeCompare(a, 'en', { numeric: true }));
   } catch {
-    throw new Error(`未找到 Codex Desktop CUA 插件。${hint}`);
+    throw new Error(`Codex Desktop CUA plugin not found. ${hint}`);
   }
   for (const version of versions) {
     try {
@@ -32,7 +32,7 @@ function discover() {
       return { config, version, services };
     } catch { /* An incomplete update must not hide an older usable runtime. */ }
   }
-  throw new Error(`没有找到完整可用的 Codex Desktop CUA 运行时。${hint}`);
+  throw new Error(`No complete, usable Codex Desktop CUA runtime found. ${hint}`);
 }
 
 async function write(stream, value) {
@@ -68,7 +68,7 @@ async function main() {
   const confirmations = new Map();
   const progressTokens = new Map();
   let confirmationQueue = Promise.resolve();
-  let approvalScope = null;
+  const approvals = { yolo: false, apps: new Set() };
   const cancelConfirmations = () => {
     for (const controller of confirmations.values()) controller.abort();
   };
@@ -145,11 +145,11 @@ async function main() {
                 }
               },5000);
               try {
-                const result = controller.signal.aborted ? {action:'cancel'} : canReuseApproval(approvalScope,message.params)
+                const result = controller.signal.aborted ? {action:'cancel'} : canReuseApproval(approvals,message.params)
                   ? {action:'accept',content:{}} : await requestConsent(message.params,controller.signal);
                 if (!closing && !controller.signal.aborted && result.action === 'accept' && result.scope) {
-                  approvalScope = result.scope;
-                  console.error(`[codex-desktop-cua] Session authorization enabled: ${approvalScope}; reset on reconnect.`);
+                  rememberApproval(approvals,result.scope,message.params);
+                  console.error(`[codex-desktop-cua] Session authorization enabled: ${result.scope}; reset on reconnect.`);
                 }
                 if (!closing && child.stdin.writable) await write(child.stdin,{jsonrpc:'2.0',id:message.id,
                   result:controller.signal.aborted ? {action:'cancel'} : result.action === 'accept'
@@ -171,7 +171,7 @@ async function main() {
             }
             if (method === 'initialize' && message.result) {
               message.result.instructions = (message.result.instructions || '') +
-                '\nUse js for Windows computer operations. Confirmation uses a local Windows dialog. The user can approve once, allow all app access for this connection, or explicitly select YOLO for supported Computer Use confirmations. Session choices reset on reconnect. Unsupported forms are cancelled. ' +
+                '\nUse js for Windows computer operations. Confirmation uses a local Windows dialog. The user can decline, approve once, allow the same app for this connection, or select YOLO for supported Computer Use confirmations; after 15 seconds the dialog applies its default (allow the same app, or decline when that option is unavailable). Session choices reset on reconnect. Unsupported forms are cancelled. ' +
                 'This wrapper does not install Codex turn hooks and nothing else here detects the end of a turn. End every turn that used computer control by calling turn_ended and js_reset, so the local Computer Use indication does not outlive the work. Never retry failed input automatically.';
             }
             if (message.result?.isError && pipeFailure.test((message.result.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n'))) {

@@ -28,13 +28,22 @@ export function isApplicationAccessConfirmation(params) {
   !!input && typeof input.app === 'string' && input.app.length > 0 && Object.keys(input).every(key => key === 'app');
 }
 
-export function canReuseApproval(scope, params) {
- return scope === 'yolo' ? isComputerUseConfirmation(params) : scope === 'apps' && isApplicationAccessConfirmation(params);
+const appKey = params => params._meta.tool_params.app.toLowerCase();
+
+// approvals: { yolo: boolean, apps: Set<string> }, held per connection by the wrapper.
+export function canReuseApproval(approvals, params) {
+ return approvals.yolo && isComputerUseConfirmation(params) ||
+  isApplicationAccessConfirmation(params) && approvals.apps.has(appKey(params));
+}
+
+export function rememberApproval(approvals, scope, params) {
+ if (scope === 'yolo') approvals.yolo = true;
+ if (scope === 'app') approvals.apps.add(appKey(params));
 }
 
 export function parseChoice(output, exitCode, scopes = {}) {
  if (exitCode !== 0) return { action: 'cancel' };
- if (output.trim() === 'accept_all' && scopes.apps) return {action:'accept',content:{},scope:'apps'};
+ if (output.trim() === 'accept_app' && scopes.app) return {action:'accept',content:{},scope:'app'};
  if (output.trim() === 'yolo' && scopes.yolo) return {action:'accept',content:{},scope:'yolo'};
  if (output.trim() === 'accept') return { action: 'accept', content: {} };
  if (output.trim() === 'decline') return { action: 'decline' };
@@ -50,13 +59,13 @@ export async function requestConsent(params, signal) {
  let cancelled = false;
  let visible = false;
  let diagnostics = '';
- const scopes = {apps:isApplicationAccessConfirmation(params),yolo:isComputerUseConfirmation(params)};
+ const scopes = {app:isApplicationAccessConfirmation(params),yolo:isComputerUseConfirmation(params)};
  const abort = () => { cancelled = true; child?.kill(); };
  try {
   dir = mkdtempSync(join(tmpdir(), 'cua-access-confirmation-'));
   const path = join(dir, 'request.json');
   // Payload is data read by the fixed script, never interpolated into PowerShell.
-  writeFileSync(path, JSON.stringify({...params,allowSessionAll:scopes.apps,allowYolo:scopes.yolo}), { mode: 0o600 });
+  writeFileSync(path, JSON.stringify({...params,allowApp:scopes.app,allowYolo:scopes.yolo}), { mode: 0o600 });
   return await new Promise(resolve => {
    child = spawn('pwsh', ['-NoProfile','-NonInteractive','-STA','-File',fileURLToPath(new URL('./confirm-access.ps1',import.meta.url)),'-RequestPath',path],
     { stdio: ['ignore','pipe','pipe'], windowsHide: false });
@@ -83,7 +92,7 @@ export async function requestConsent(params, signal) {
     resolve(result);
    });
    timer = setTimeout(abort,45000);
-   console.error('[codex-desktop-cua] Waiting for local app-access confirmation (45s; default cancel).');
+   console.error('[codex-desktop-cua] Waiting for local app-access confirmation (15s countdown to the default choice).');
   });
  } catch {
   return {action:'cancel'};
