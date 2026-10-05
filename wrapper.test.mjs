@@ -16,12 +16,14 @@ for await (const chunk of process.stdin) {
  const line=buffer.slice(0,end);buffer=buffer.slice(end+1);
  const q=JSON.parse(line); if(q.id===undefined)continue;
  let result;
+ const elicit=(message,requestedSchema)=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:'host-approval',method:'elicitation/create',params:{message,requestedSchema}})+'\\n');
  if(q.method==='initialize') {
   result={protocolVersion:'2024-11-05',capabilities:{tools:{}},serverInfo:{name:process.env.FIXTURE_VERSION,version:'1',clientCapabilities:q.params?.capabilities}};
-  process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:'host-approval',method:'elicitation/create',params:{message:process.env.FIXTURE_CONFIRM ? 'Automated test: do not click. The dialog cancels itself once visible and accesses no app.' : 'Approve?',requestedSchema:process.env.FIXTURE_CONFIRM ? {type:'object',properties:{}} : {type:'object'}}})+'\\n');
+  if(!process.env.FIXTURE_CONFIRM) elicit('Approve?',{type:'object'});
  }
  else if(!q.method) result={received:q.result};
- else if(q.method==='tools/list') result={tools:['js','js_reset','turn_ended','js_add_node_module_dir'].map(name=>({name,inputSchema:{type:'object'}}))};
+ else if(q.method==='tools/list') result={tools:['js','js_reset','turn_ended','js_add_node_module_dir'].map(name=>({name,description:name,inputSchema:{type:'object'}}))};
+ else if(q.params?.arguments?.code==='confirm') { elicit('Automated test: do not click. The dialog cancels itself once visible and accesses no app.',{type:'object',properties:{}}); continue; }
  else if(q.params?.arguments?.code==='pipe') result={isError:true,content:[{type:'text',text:'Computer Use native pipe is unavailable: os error 2'}]};
  else result={content:[{type:'text',text:JSON.stringify({surface:process.env.CUA_REPL_ENABLED_SURFACES,sky:JSON.parse(process.env.NODE_REPL_TRUSTED_SERVICES).sky,value:q.params?.arguments?.code})}]};
  process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\\n');
@@ -64,6 +66,8 @@ test('discovers newest usable version, relays MCP, filters tools and explains na
   assert.equal(replies.get(1).result.serverInfo.name,'26.10.1');
   assert.doesNotMatch(replies.get(1).result.instructions,/Start ChatGPT Desktop/);
   assert.deepEqual(replies.get(2).result.tools.map(t=>t.name),['js','js_reset','turn_ended']);
+  assert.match(replies.get(2).result.tools[0].description,/^js\n\nOn Windows, `cua\.getApp` accepts only `\{ windowId \}`/);
+  assert.equal(replies.get(2).result.tools[1].description,'js_reset');
   const value=JSON.parse(replies.get(3).result.content[0].text);
   assert.equal(value.surface,'computer');assert.equal(value.sky,'@oai/sky/service');assert.equal(value.value,'naïve ✓\u2028ok');
   assert.equal(replies.get(4).result.isError,true);
@@ -76,7 +80,7 @@ test('discovers newest usable version, relays MCP, filters tools and explains na
  } finally {if(child && child.exitCode===null)child.kill();rmSync(home,{recursive:true,force:true});}
 });
 
-test('native confirmation is visibly shown and cancellation reaches the server', {skip:process.platform!=='win32' || process.env.CUA_WRAPPER_GUI_TESTS!=='1',timeout:15000}, async () => {
+test('native confirmation is visibly shown and only cancelling its tool call reaches the server', {skip:process.platform!=='win32' || process.env.CUA_WRAPPER_GUI_TESTS!=='1',timeout:15000}, async () => {
  const home=mkdtempSync(join(tmpdir(),'desktop-cua-confirm-'));
  let child;
  try {
@@ -89,12 +93,18 @@ test('native confirmation is visibly shown and cancellation reaches the server',
   const exited=new Promise(r=>child.once('close',r));
   const send=q=>child.stdin.write(JSON.stringify({jsonrpc:'2.0',...q})+'\n');
   send({id:1,method:'initialize',params:{}});
+  send({id:2,method:'tools/call',params:{name:'js',arguments:{code:'confirm'}}});
   const deadline=Date.now()+9000;
   while(!stderr.includes('Confirmation window is visible')) {
    assert.ok(Date.now()<deadline,stderr);
    await new Promise(r=>setTimeout(r,30));
   }
+  // Completed and unknown requests do not own the pending confirmation.
   send({method:'notifications/cancelled',params:{requestId:1}});
+  send({method:'notifications/cancelled',params:{requestId:999}});
+  await new Promise(r=>setTimeout(r,500));
+  assert.doesNotMatch(stdout+stderr,/"received"|Local confirmation result/);
+  send({method:'notifications/cancelled',params:{requestId:2}});
   while(!stdout.includes('"received":{"action":"cancel"}')) {
    assert.ok(Date.now()<deadline,stdout+stderr);
    await new Promise(r=>setTimeout(r,30));

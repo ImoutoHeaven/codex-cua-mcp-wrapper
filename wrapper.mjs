@@ -65,12 +65,15 @@ async function main() {
     NODE_REPL_TRUSTED_SERVICES: JSON.stringify({ ...services, sky: '@oai/sky/service' }) };
   const child = spawn(config.command, config.args, { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const pending = new Map();
+  // Elicitation id -> { controller, calls }: calls are the client tool calls pending when it arrived.
+  // The wire format does not name the parent request, so any of them may own it.
   const confirmations = new Map();
   const progressTokens = new Map();
   let confirmationQueue = Promise.resolve();
   const approvals = { yolo: false, apps: new Set() };
-  const cancelConfirmations = () => {
-    for (const controller of confirmations.values()) controller.abort();
+  // Without an id, cancel every confirmation; with one, only those it may own.
+  const cancelConfirmations = id => {
+    for (const { controller, calls } of confirmations.values()) if (id === undefined || calls.has(id)) controller.abort();
   };
   let closing = false;
   let timer;
@@ -110,8 +113,8 @@ async function main() {
             message.params.capabilities ||= {};
             message.params.capabilities.elicitation = { form: {} };
           }
-          if (message.method === 'notifications/cancelled' ||
-              (message.method === 'tools/call' && ['js_reset','turn_ended'].includes(message.params?.name))) cancelConfirmations();
+          if (message.method === 'notifications/cancelled' && pending.get(message.params?.requestId) === 'tools/call') cancelConfirmations(message.params.requestId);
+          if (message.method === 'tools/call' && ['js_reset','turn_ended'].includes(message.params?.name)) cancelConfirmations();
           if (message.method === 'tools/call' && !allowed.has(message.params?.name)) {
             if (message.id !== undefined) await write(process.stdout, { jsonrpc: '2.0', id: message.id,
               error: { code: -32602, message: 'Tool is not enabled by this desktop wrapper.' } });
@@ -128,7 +131,7 @@ async function main() {
       })(),
       (async () => {
         for await (const message of records(child.stdout)) {
-          if (message.method === 'notifications/cancelled') confirmations.get(message.params?.requestId)?.abort();
+          if (message.method === 'notifications/cancelled') confirmations.get(message.params?.requestId)?.controller.abort();
           if (message.method === 'elicitation/create' && message.id !== undefined) {
             if (closing || !isAccessConfirmation(message.params)) {
               console.error('[codex-desktop-cua] Unsupported or cancelled confirmation; refusing to authorize.');
@@ -136,12 +139,14 @@ async function main() {
               continue;
             }
             const controller = new AbortController();
-            confirmations.set(message.id,controller);
+            const entry = { controller, calls: new Set([...pending].filter(([, method]) => method === 'tools/call').map(([id]) => id)) };
+            confirmations.set(message.id,entry);
             // Do not block the protocol reader while the user decides; queue dialogs locally.
             confirmationQueue = confirmationQueue.then(async () => {
               const heartbeat = setInterval(() => {
-                for (const token of progressTokens.values()) {
-                  write(process.stdout,{jsonrpc:'2.0',method:'notifications/progress',params:{progressToken:token,progress:0,message:'Waiting for local app-access confirmation'}}).catch(() => {});
+                for (const id of entry.calls) {
+                  const token = progressTokens.get(id);
+                  if (token !== undefined) write(process.stdout,{jsonrpc:'2.0',method:'notifications/progress',params:{progressToken:token,progress:0,message:'Waiting for local app-access confirmation'}}).catch(() => {});
                 }
               },5000);
               try {
@@ -156,7 +161,7 @@ async function main() {
                     ? {action:'accept',content:result.content || {}} : {action:result.action}});
               } finally {
                 clearInterval(heartbeat);
-                if (confirmations.get(message.id) === controller) confirmations.delete(message.id);
+                if (confirmations.get(message.id) === entry) confirmations.delete(message.id);
               }
             }).catch(error => { console.error('[codex-desktop-cua] Confirmation delivery failed; closing the runtime.'); shutdown(); });
             continue;
@@ -165,9 +170,15 @@ async function main() {
             const method = pending.get(message.id);
             pending.delete(message.id);
             progressTokens.delete(message.id);
-            if (method === 'tools/call') cancelConfirmations();
+            // A confirmation is orphaned once every request that may own it has finished.
+            for (const { controller, calls } of confirmations.values()) {
+              if (calls.delete(message.id) && !calls.size) controller.abort();
+            }
             if (method === 'tools/list' && Array.isArray(message.result?.tools)) {
               message.result.tools = message.result.tools.filter(t => allowed.has(t.name));
+              const js = message.result.tools.find(t => t.name === 'js');
+              if (typeof js?.description === 'string') js.description += '\n\nOn Windows, `cua.getApp` accepts only `{ windowId }` from `cua.listApps()` or `cua.listWindows()`; app names and paths fail. ' +
+                'If the first observation after input looks unchanged, observe again before acting.';
             }
             if (method === 'initialize' && message.result) {
               message.result.instructions = (message.result.instructions || '') +
