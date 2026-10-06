@@ -13,7 +13,10 @@ public static class CuaConfirmationWindow {
 $request = Get-Content -LiteralPath $RequestPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $seconds = 15
 $app = [string]$request._meta.tool_params.app
-$allowApp = $request.allowApp -eq $true -and $app
+$site = $request.scopeKind -eq 'site'
+$grantName = if ($request.scopeTarget) { [string]$request.scopeTarget } else { $app }
+$allowApp = $request.allowApp -eq $true -and $grantName
+$defaultAllow = $allowApp -and $request.defaultAllow -eq $true
 $allowYolo = $request.allowYolo -eq $true
 
 $light = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -ErrorAction SilentlyContinue).AppsUseLightTheme -eq 1
@@ -216,7 +219,7 @@ $xaml = @'
        <Button x:Name="Once" Style="{StaticResource Btn}" Content="Allow once" Margin="8,0,0,0"/>
        <Button x:Name="App" Style="{StaticResource Primary}" Margin="8,0,0,0" AutomationProperties.Name="Allow this app">
         <StackPanel Orientation="Horizontal">
-         <TextBlock Text="Allow this app"/>
+         <TextBlock x:Name="AppLabel" Text="Allow this app"/>
          <Border x:Name="AppChip" Style="{StaticResource Chip}" Visibility="Collapsed" Background="#30FFFFFF" Margin="8,0,-6,0" Padding="6,0,6,1" MinWidth="24">
           <TextBlock x:Name="AppCount" FontSize="11.5" HorizontalAlignment="Center"/>
          </Border>
@@ -234,12 +237,12 @@ foreach ($key in $palette.Keys) { $xaml = $xaml.Replace("{{$key}}", $palette[$ke
 $window = [Windows.Markup.XamlReader]::Parse($xaml)
 $ui = @{}
 foreach ($name in 'Badge','BadgeGlyph','Card','CardScale','CardShift','AppName','RiskChip','RiskDot','RiskText','CloseButton','Message','Toggle','Chevron',
-  'Details','DetailsText','Hint','Bar','BarScale','Yolo','Deny','DenyChip','DenyCount','Once','App','AppChip','AppCount') {
+  'Details','DetailsText','Hint','Bar','BarScale','Yolo','Deny','DenyChip','DenyCount','Once','App','AppLabel','AppChip','AppCount') {
  $ui[$name] = $window.FindName($name)
 }
 $brush = { param($color) [Windows.Media.BrushConverter]::new().ConvertFromString($color) }
 
-$ui.AppName.Text = if ($app) { $app } else { 'Computer Use' }
+$ui.AppName.Text = if ($grantName) { $grantName } else { 'Computer Use' }
 $ui.Message.Text = [string]$request.message
 $ui.DetailsText.Text = if ($null -ne $request._meta.tool_params) { $request._meta.tool_params | ConvertTo-Json -Depth 15 } else { '(no parameters)' }
 $risk = switch ([string]$request._meta.riskLevel) {
@@ -260,19 +263,24 @@ if ($request._meta.riskLevel -eq 'high') {
  $ui.BadgeGlyph.Text = [char]0xE7BA
 }
 
-$target = if ($app) { $app } else { 'this app' }
+$target = if ($grantName) { $grantName } else { 'this app' }
 $hints = @{
  Deny = 'Decline this request without granting any access.'
  Once = 'Allow only this request; the next one asks again.'
  App = "Automatically allow further low-risk access to $target for this connection; reconnecting clears it."
- Yolo = 'Automatically accept every supported Computer Use confirmation for this connection, including high-risk requests. Use only for trusted tasks.'
+ Yolo = 'Automatically accept every supported Computer Use and browser site confirmation for this connection, including high-risk requests. Use only for trusted tasks.'
 }
-if ($allowApp) {
+if ($site) {
+ $ui.AppLabel.Text = 'Allow this site'
+ [Windows.Automation.AutomationProperties]::SetName($ui.App, 'Allow this site')
+ $hints.App = "Automatically allow further browser access to $target for this connection; reconnecting clears it."
+}
+if ($defaultAllow) {
  $default = 'accept_app'; $defaultButton = $ui.App; $chip = $ui.AppChip; $count = $ui.AppCount
  $idleHint = "When the countdown ends, further low-risk access to $target is allowed for this connection. Press Esc to cancel."
 } else {
  $default = 'decline'; $defaultButton = $ui.Deny; $chip = $ui.DenyChip; $count = $ui.DenyCount
- $ui.App.Visibility = 'Collapsed'
+ if (-not $allowApp) { $ui.App.Visibility = 'Collapsed' }
  $ui.Bar.Background = & $brush $palette.Muted
  $idleHint = 'When the countdown ends, this request is declined. Press Esc to cancel.'
 }

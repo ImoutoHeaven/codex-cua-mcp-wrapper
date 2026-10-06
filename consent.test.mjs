@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isAccessConfirmation, isApplicationAccessConfirmation, canReuseApproval, rememberApproval, parseChoice, requestConsent } from './consent.mjs';
+import { isAccessConfirmation, isApplicationAccessConfirmation, isSiteAccessConfirmation, canReuseApproval, rememberApproval, parseChoice, requestConsent } from './consent.mjs';
 
 const form = { mode: 'form', message: 'Allow Codex to use calc?', requestedSchema: { type: 'object', properties: {} }, _meta: { connector_id: 'computer-use', codex_approval_kind: 'mcp_tool_call', riskLevel:'low', tool_params: { app: 'calc.exe' } } };
 
@@ -19,7 +19,7 @@ test('only explicit local button choices produce accept; closing, failure and ma
  }
 });
 
-const fresh = () => ({yolo:false,apps:new Set()});
+const fresh = () => ({yolo:false,grants:new Set()});
 const forApp = app => ({...form,_meta:{...form._meta,tool_params:{app}}});
 
 test('allow-same-app is reused only for the approved app\'s low-risk access', () => {
@@ -48,6 +48,27 @@ test('YOLO is explicitly selected and reused only within supported computer-use 
  assert.equal(canReuseApproval(approvals,higherRisk),true);
  assert.equal(canReuseApproval(approvals,{...form,_meta:{connector_id:'other'}}),false);
  assert.equal(canReuseApproval(approvals,{...form,requestedSchema:{type:'object',properties:{secret:{type:'string'}}}}),false);
+});
+
+const site = origin => ({ mode: 'form', message: `Allow Browser use to access ${origin}?`, requestedSchema: { type: 'object', properties: {} },
+ _meta: { connector_id: 'browser-use', codex_approval_kind: 'mcp_tool_call', tool_name: 'access_browser_origin', origin, persist: 'always', tool_params: { origin } } });
+
+test('allow-this-site is reused only for the same exact origin; YOLO covers site confirmations', () => {
+ const example = site('https://example.com');
+ assert.equal(isSiteAccessConfirmation(example),true);
+ for(const params of [site('https://example.com/'),site('file://x'),site('not a url'),{...example,_meta:{...example._meta,origin:'https://other.com'}},
+  {...example,_meta:{...example._meta,tool_name:'other'}},{...example,_meta:{...example._meta,tool_params:{origin:'https://example.com',x:1}}}]) {
+  assert.equal(isSiteAccessConfirmation(params),false);
+ }
+ const approvals = fresh();
+ rememberApproval(approvals,'app',example);
+ assert.equal(canReuseApproval(approvals,site('https://example.com')),true);
+ assert.equal(canReuseApproval(approvals,site('http://example.com')),false);
+ assert.equal(canReuseApproval(approvals,forApp('https://example.com')),false);
+ const yolo = fresh();
+ rememberApproval(yolo,'yolo',example);
+ assert.equal(canReuseApproval(yolo,site('https://other.com')),true);
+ assert.equal(canReuseApproval(yolo,form),true);
 });
 
 test('unsupported forms and pre-cancelled calls never open a dialog', async () => {

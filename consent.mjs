@@ -17,8 +17,9 @@ export function isAccessConfirmation(params) {
   (schema.additionalProperties === undefined || typeof schema.additionalProperties === 'boolean');
 }
 
+// Computer Use app access and Chrome site access confirmations; YOLO covers both.
 function isComputerUseConfirmation(params) {
- return isAccessConfirmation(params) && params._meta?.connector_id === 'computer-use' &&
+ return isAccessConfirmation(params) && ['computer-use','browser-use'].includes(params._meta?.connector_id) &&
   params._meta.codex_approval_kind === 'mcp_tool_call';
 }
 
@@ -28,17 +29,33 @@ export function isApplicationAccessConfirmation(params) {
   !!input && typeof input.app === 'string' && input.app.length > 0 && Object.keys(input).every(key => key === 'app');
 }
 
-const appKey = params => params._meta.tool_params.app.toLowerCase();
+export function isSiteAccessConfirmation(params) {
+ const meta = params?._meta;
+ const origin = meta?.tool_params?.origin;
+ if (!isComputerUseConfirmation(params) || meta.connector_id !== 'browser-use' || meta.tool_name !== 'access_browser_origin' ||
+  typeof origin !== 'string' || meta.origin !== origin || Object.keys(meta.tool_params).some(key => key !== 'origin')) return false;
+ try {
+  const url = new URL(origin);
+  return ['http:','https:'].includes(url.protocol) && url.origin === origin;
+ } catch { return false; }
+}
 
-// approvals: { yolo: boolean, apps: Set<string> }, held per connection by the wrapper.
+// The connection-scoped grant a request may reuse: one app name or one exact site origin.
+function grant(params) {
+ if (isApplicationAccessConfirmation(params)) return { kind: 'app', target: params._meta.tool_params.app, key: 'app:' + params._meta.tool_params.app.toLowerCase() };
+ if (isSiteAccessConfirmation(params)) return { kind: 'site', target: params._meta.origin, key: 'site:' + params._meta.origin };
+}
+
+// approvals: { yolo: boolean, grants: Set<string> }, held per connection by the wrapper.
 export function canReuseApproval(approvals, params) {
- return approvals.yolo && isComputerUseConfirmation(params) ||
-  isApplicationAccessConfirmation(params) && approvals.apps.has(appKey(params));
+ const key = grant(params)?.key;
+ return approvals.yolo && isComputerUseConfirmation(params) || key !== undefined && approvals.grants.has(key);
 }
 
 export function rememberApproval(approvals, scope, params) {
  if (scope === 'yolo') approvals.yolo = true;
- if (scope === 'app') approvals.apps.add(appKey(params));
+ const key = grant(params)?.key;
+ if (scope === 'app' && key !== undefined) approvals.grants.add(key);
 }
 
 export function parseChoice(output, exitCode, scopes = {}) {
@@ -59,13 +76,16 @@ export async function requestConsent(params, signal) {
  let cancelled = false;
  let visible = false;
  let diagnostics = '';
- const scopes = {app:isApplicationAccessConfirmation(params),yolo:isComputerUseConfirmation(params)};
+ const scope = grant(params);
+ const scopes = {app:!!scope,yolo:isComputerUseConfirmation(params)};
  const abort = () => { cancelled = true; child?.kill(); };
  try {
   dir = mkdtempSync(join(tmpdir(), 'cua-access-confirmation-'));
   const path = join(dir, 'request.json');
   // Payload is data read by the fixed script, never interpolated into PowerShell.
-  writeFileSync(path, JSON.stringify({...params,allowApp:scopes.app,allowYolo:scopes.yolo}), { mode: 0o600 });
+  // Only low-risk app access defaults to a grant; site access defaults to decline.
+  writeFileSync(path, JSON.stringify({...params,allowApp:scopes.app,allowYolo:scopes.yolo,scopeKind:scope?.kind,scopeTarget:scope?.target,
+   defaultAllow:scope?.kind === 'app'}), { mode: 0o600 });
   return await new Promise(resolve => {
    child = spawn('pwsh', ['-NoProfile','-NonInteractive','-STA','-File',fileURLToPath(new URL('./confirm-access.ps1',import.meta.url)),'-RequestPath',path],
     { stdio: ['ignore','pipe','pipe'], windowsHide: false });
