@@ -1,162 +1,109 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { spawn, spawnSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { codexHome, testEnv, client, connect } from './fixture-home.mjs';
 
 const wrapper = fileURLToPath(new URL('./wrapper.mjs', import.meta.url));
-const fake = `
-process.stdin.setEncoding('utf8');
-let buffer='';
-for await (const chunk of process.stdin) {
- buffer+=chunk;let end;
- while((end=buffer.indexOf('\\n'))!==-1) {
- const line=buffer.slice(0,end);buffer=buffer.slice(end+1);
- const q=JSON.parse(line); if(q.id===undefined)continue;
- let result;
- const elicit=(message,requestedSchema)=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:'host-approval',method:'elicitation/create',params:{message,requestedSchema}})+'\\n');
- if(q.method==='initialize') {
-  result={protocolVersion:'2024-11-05',capabilities:{tools:{}},serverInfo:{name:process.env.FIXTURE_VERSION,version:'1',clientCapabilities:q.params?.capabilities}};
-  if(!process.env.FIXTURE_CONFIRM) elicit('Approve?',{type:'object'});
- }
- else if(!q.method) result={received:q.result};
- else if(q.method==='tools/list') result={tools:['js','js_reset','turn_ended','js_add_node_module_dir'].map(name=>({name,description:name,inputSchema:name==='turn_ended'?{type:'object',required:['hook_event_name','session_id','turn_id']}:{type:'object'}}))};
- else if(q.params?.name==='turn_ended' && (['hook_event_name','session_id','turn_id'].some(k=>typeof q.params.arguments?.[k]!=='string') || q.params.arguments.hook_event_name==='fail')) result={isError:true,content:[{type:'text',text:'invalid turn_ended'}]};
- else if(q.params?.arguments?.code==='confirm') { elicit('Automated test: do not click. The dialog cancels itself once visible and accesses no app.',{type:'object',properties:{}}); continue; }
- else if(q.params?.arguments?.code==='pipe') result={isError:true,content:[{type:'text',text:'Computer Use native pipe is unavailable: os error 2'}]};
- else result={content:[{type:'text',text:JSON.stringify({surface:process.env.CUA_REPL_ENABLED_SURFACES,sky:JSON.parse(process.env.NODE_REPL_TRUSTED_SERVICES).sky,value:q.params?.arguments?.code,args:q.params?.arguments,meta:q.params?._meta?.['x-codex-turn-metadata']})}]};
- process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\\n');
- }
+
+function alive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
 }
+
+async function gone(pid, ms = 8000) {
+  const deadline = Date.now() + ms;
+  while (alive(pid)) {
+    if (Date.now() > deadline) return false;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  return true;
+}
+
+// The real entry point as an MCP client starts it; stdout must carry only protocol records.
+function start(t) {
+  const { home, remove } = codexHome();
+  const child = spawn(process.execPath, [wrapper], { env: testEnv(home), windowsHide: true });
+  let raw = '', stderr = '';
+  child.stdout.on('data', chunk => { raw += chunk; });
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const exited = once(child, 'exit').then(([code]) => code);
+  const c = client({ write: line => child.stdin.write(line), end: () => child.stdin.end(), output: child.stdout, done: exited });
+  t.after(async () => { if (child.exitCode === null) child.kill(); remove(); });
+  return { child, c, exited, stdout: () => raw, stderr: () => stderr };
+}
+
+test('malformed input gets a parse error, stdout stays protocol-only, and end of input stops every backend process', async t => {
+  const { child, c, exited, stdout, stderr } = start(t);
+  child.stdin.write('this is not json\n[1,2]\n');
+  await c.initialize();
+  const { pid } = await c.json('env');
+  const { helper } = await c.json('helper');
+  assert.ok(alive(pid) && alive(helper));
+  c.send({ id: 'no-method' });
+  c.send({ id: 'bad-method', method: 42 });
+  c.send({ id: true, method: 'ping' });
+  assert.deepEqual((await c.request('ping', {}, 'after')).result, {});
+  const started = Date.now();
+  child.stdin.end();
+  assert.equal(await exited, 0);
+  assert.ok(Date.now() - started < 8000);
+  assert.ok(await gone(pid), 'backend survived');
+  assert.ok(await gone(helper), 'backend helper survived');
+  const records = stdout().trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(records.slice(0, 2).map(r => [r.id, r.error.code]), [[null, -32700], [null, -32700]]);
+  assert.deepEqual(records.filter(r => r.error?.code === -32600).map(r => r.id), ['no-method', 'bad-method', null]);
+  assert.ok(records.every(r => r.jsonrpc === '2.0'));
+  assert.match(stderr(), /\[codex-desktop-cua\] Started runtime 26\.1023\.1 \(generation 1\)\./);
+});
+
+test('killing the wrapper stops the backend and its helpers', { skip: process.platform !== 'win32' }, async t => {
+  const { child, c } = start(t);
+  await c.initialize();
+  const { pid } = await c.json('env');
+  const { helper } = await c.json('helper');
+  child.kill('SIGKILL');
+  assert.ok(await gone(pid), 'backend survived');
+  assert.ok(await gone(helper), 'backend helper survived');
+});
+
+// Answers initialize, then closes its stdout and keeps running.
+const MUTE = `Add-Type -Namespace Fixture -Name Kernel -MemberDefinition '[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n); [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);'
+$id = ([Console]::In.ReadLine() | ConvertFrom-Json).id
+[Console]::Out.Write('{"jsonrpc":"2.0","id":' + $id + ',"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}}}}' + [char]10)
+[Console]::Out.Flush()
+$null = [Fixture.Kernel]::CloseHandle([Fixture.Kernel]::GetStdHandle(-11))
+Start-Sleep -Seconds 60
 `;
 
-test('discovers newest usable version, relays MCP, filters tools and explains native-pipe failures', async () => {
- const home=mkdtempSync(join(tmpdir(),'desktop-cua-test-'));
- let child;
- try {
-  const runtime=join(home,'fake runtime.mjs'); writeFileSync(runtime,fake);
-  for(const version of ['26.9.1','26.10.1','26.11.1']) {
-   const dir=join(home,'plugins/cache/openai-bundled/unified-computer-use',version);mkdirSync(dir,{recursive:true});
-   writeFileSync(join(dir,'.mcp.json'),JSON.stringify({mcpServers:{cua_repl:{command:process.execPath,args:[version==='26.11.1'?join(home,'missing.mjs'):runtime],enabled_tools:['js','js_reset','turn_ended'],env:{CUA_REPL_NODE_REPL_PATH:process.execPath,CUA_REPL_ENABLED_SURFACES:'browser',NODE_REPL_TRUSTED_SERVICES:'{"browser":"original"}',FIXTURE_VERSION:version}}}}));
-  }
-  const requests=[
-   {id:1,method:'initialize',params:{}},
-   {id:2,method:'tools/list'},
-   {id:3,method:'tools/call',params:{name:'js',arguments:{code:'naïve ✓\u2028ok'}}},
-   {id:4,method:'tools/call',params:{name:'js',arguments:{code:'pipe'}}},
-   {id:5,method:'tools/call',params:{name:'js_add_node_module_dir',arguments:{path:'no'}}},
-  ];
-  child=spawn(process.execPath,[wrapper],{env:{...process.env,CODEX_HOME:home},windowsHide:true});
-  let stdout='',stderr='';
-  child.stdout.setEncoding('utf8');child.stdout.on('data',chunk=>stdout+=chunk);
-  child.stderr.setEncoding('utf8');child.stderr.on('data',chunk=>stderr+=chunk);
-  const exited=new Promise(resolve=>child.on('close',resolve));
-  child.stdin.write(requests.map(q=>JSON.stringify({jsonrpc:'2.0',...q})).join('\n')+'\n');
-  const deadline=Date.now()+10000;
-  while(!stdout.includes('"received":{"action":"cancel"}')) {
-   assert.ok(Date.now()<deadline,stdout+stderr);
-   await new Promise(resolve=>setTimeout(resolve,20));
-  }
-  child.stdin.end();
-  assert.equal(await exited,0,stderr);
-  const run={stdout};
-  const replies=new Map(stdout.trim().split('\n').map(s=>{const q=JSON.parse(s);return[q.id,q];}));
-  assert.equal(replies.get(1).result.serverInfo.name,'26.10.1');
-  assert.doesNotMatch(replies.get(1).result.instructions,/Start ChatGPT Desktop/);
-  assert.deepEqual(replies.get(2).result.tools.map(t=>t.name),['js','js_reset','turn_ended']);
-  assert.match(replies.get(2).result.tools[0].description,/^js\n\nOn Windows, `cua\.getApp` accepts only `\{ windowId \}`/);
-  assert.equal(replies.get(2).result.tools[1].description,'js_reset');
-  const value=JSON.parse(replies.get(3).result.content[0].text);
-  assert.equal(value.surface,'browser,computer');assert.equal(value.sky,'@oai/sky/service');assert.equal(value.value,'naïve ✓\u2028ok');
-  assert.equal(replies.get(4).result.isError,true);
-  assert.match(replies.get(4).result.content.map(c=>c.text).join('\n'),/Start ChatGPT Desktop/);
-  assert.ok(replies.get(5).error);
-  assert.equal(replies.get(2).result.tools[2].inputSchema.required,undefined);
-  assert.deepEqual(replies.get(1).result.serverInfo.clientCapabilities.elicitation,{form:{}});
-  assert.ok(!run.stdout.split('\n').filter(Boolean).map(s=>JSON.parse(s)).some(q=>q.method==='elicitation/create'));
-  assert.deepEqual(replies.get('host-approval').result,{received:{action:'cancel'}});
- } finally {if(child && child.exitCode===null)child.kill();rmSync(home,{recursive:true,force:true});}
+test('a runtime that closes its output while still running is stopped instead of leaving requests pending', { skip: process.platform !== 'win32' }, async t => {
+  const { home, remove } = codexHome({ '26.1': dir => {
+    writeFileSync(join(dir, 'mute.ps1'), MUTE);
+    return { command: 'pwsh', args: ['-NoProfile', '-NonInteractive', '-File', join(dir, 'mute.ps1')] };
+  } });
+  const c = connect({ env: testEnv(home) });
+  t.after(async () => { await c.close(); remove(); });
+  assert.ok((await c.initialize()).result);
+  const listed = await c.request('tools/list', {});
+  assert.match(listed.error.message, /generation 1\) closed its output while this request was running\./);
+  // The generation is over before any process exits, so the next tool call reports the loss instead of running.
+  const next = (await c.call('js', { code: 'state' })).result;
+  assert.equal(next.isError, true);
+  assert.match(next.content[0].text, /generation 1\) closed its output while idle\. .*\[backend\/STATE_LOST\]/);
 });
 
-test('bare turn_ended closes the latest js turn, starts the next one, and keeps failed cleanup retryable', async () => {
- const home=mkdtempSync(join(tmpdir(),'desktop-cua-turn-'));
- let child;
- try {
-  const runtime=join(home,'fake runtime.mjs');writeFileSync(runtime,fake);
-  const dir=join(home,'plugins/cache/openai-bundled/unified-computer-use/26.10.1');mkdirSync(dir,{recursive:true});
-  writeFileSync(join(dir,'.mcp.json'),JSON.stringify({mcpServers:{cua_repl:{command:process.execPath,args:[runtime],env:{CUA_REPL_NODE_REPL_PATH:process.execPath,FIXTURE_VERSION:'test',FIXTURE_CONFIRM:'1',NODE_REPL_TRUSTED_SERVICES:'{}'}}}}));
-  child=spawn(process.execPath,[wrapper],{env:{...process.env,CODEX_HOME:home},windowsHide:true});
-  let buffer='';const waiters=new Map();child.stdout.setEncoding('utf8');
-  child.stdout.on('data',chunk=>{buffer+=chunk;let end;while((end=buffer.indexOf('\n'))!==-1){const q=JSON.parse(buffer.slice(0,end));buffer=buffer.slice(end+1);waiters.get(q.id)?.(q);}});
-  let id=0;
-  // Clients wait for each reply, so send one request at a time.
-  const call=(name,args,meta)=>new Promise(resolve=>{const q={jsonrpc:'2.0',id:++id,method:'tools/call',params:{name,arguments:args,...(meta&&{_meta:{'x-codex-turn-metadata':meta}})}};waiters.set(q.id,resolve);child.stdin.write(JSON.stringify(q)+'\n');});
-  const body=async(...a)=>{const r=await call(...a);return r.result.isError?'error':JSON.parse(r.result.content[0].text);};
-  const t1=(await body('js',{code:'one'})).meta;
-  assert.equal(await body('js',{code:'computer'}).then(b=>b.surface),'computer');
-  assert.deepEqual((await body('turn_ended',{hook_event_name:'Stop',session_id:'s',turn_id:'t'})).args,{hook_event_name:'Stop',session_id:'s',turn_id:'t'});
-  assert.deepEqual((await body('turn_ended',{session_id:'s',turn_id:'t'})).args,{hook_event_name:'Stop',session_id:'s',turn_id:'t'});
-  assert.deepEqual((await body('js',{code:'still one'})).meta,t1);
-  assert.equal(await body('turn_ended',{hook_event_name:'fail'}),'error');
-  assert.deepEqual((await body('turn_ended',{})).args,{hook_event_name:'Stop',...t1});
-  const t2=(await body('js',{code:'two'})).meta;
-  assert.equal(t2.session_id,t1.session_id);assert.notEqual(t2.turn_id,t1.turn_id);
-  // A js call sent while cleanup is pending starts the next turn instead of joining the closing one.
-  const [ended,overlap]=await Promise.all([body('turn_ended',{}),body('js',{code:'three'})]);
-  assert.deepEqual(ended.args,{hook_event_name:'Stop',...t2});
-  assert.notEqual(overlap.meta.turn_id,t2.turn_id);
-  assert.deepEqual((await body('js',{code:'own'},{session_id:'host',turn_id:'h1'})).meta,{session_id:'host',turn_id:'h1'});
-  assert.deepEqual((await body('turn_ended',{})).args,{hook_event_name:'Stop',session_id:'host',turn_id:'h1'});
-  await body('js',{code:'string'},JSON.stringify({session_id:'str',turn_id:'s1'}));
-  assert.deepEqual((await body('turn_ended',{})).args,{hook_event_name:'Stop',session_id:'str',turn_id:'s1'});
-  assert.deepEqual((await body('js',{code:'still three'})).meta,overlap.meta);
- } finally {if(child && child.exitCode===null){child.stdin.end();await new Promise(r=>child.once('close',r));}rmSync(home,{recursive:true,force:true});}
-});
-
-test('native confirmation is visibly shown and only cancelling its tool call reaches the server', {skip:process.platform!=='win32' || process.env.CUA_WRAPPER_GUI_TESTS!=='1',timeout:15000}, async () => {
- const home=mkdtempSync(join(tmpdir(),'desktop-cua-confirm-'));
- let child;
- try {
-  const runtime=join(home,'fake runtime.mjs');writeFileSync(runtime,fake);
-  const dir=join(home,'plugins/cache/openai-bundled/unified-computer-use/26.10.1');mkdirSync(dir,{recursive:true});
-  writeFileSync(join(dir,'.mcp.json'),JSON.stringify({mcpServers:{cua_repl:{command:process.execPath,args:[runtime],env:{CUA_REPL_NODE_REPL_PATH:process.execPath,FIXTURE_VERSION:'test',FIXTURE_CONFIRM:'1'}}}}));
-  child=spawn(process.execPath,[wrapper],{env:{...process.env,CODEX_HOME:home},windowsHide:true});
-  let stdout='',stderr='';child.stdout.setEncoding('utf8');child.stderr.setEncoding('utf8');
-  child.stdout.on('data',c=>stdout+=c);child.stderr.on('data',c=>stderr+=c);
-  const exited=new Promise(r=>child.once('close',r));
-  const send=q=>child.stdin.write(JSON.stringify({jsonrpc:'2.0',...q})+'\n');
-  send({id:1,method:'initialize',params:{}});
-  send({id:2,method:'tools/call',params:{name:'js',arguments:{code:'confirm'}}});
-  const deadline=Date.now()+9000;
-  while(!stderr.includes('Confirmation window is visible')) {
-   assert.ok(Date.now()<deadline,stderr);
-   await new Promise(r=>setTimeout(r,30));
-  }
-  // Completed and unknown requests do not own the pending confirmation.
-  send({method:'notifications/cancelled',params:{requestId:1}});
-  send({method:'notifications/cancelled',params:{requestId:999}});
-  await new Promise(r=>setTimeout(r,500));
-  assert.doesNotMatch(stdout+stderr,/"received"|Local confirmation result/);
-  send({method:'notifications/cancelled',params:{requestId:2}});
-  while(!stdout.includes('"received":{"action":"cancel"}')) {
-   assert.ok(Date.now()<deadline,stdout+stderr);
-   await new Promise(r=>setTimeout(r,30));
-  }
-  child.stdin.end();assert.equal(await exited,0,stderr);
- } finally {
-  if(child && child.exitCode===null){child.stdin.end();await new Promise(r=>child.once('close',r));}
-  rmSync(home,{recursive:true,force:true});
- }
-});
-
-test('missing desktop installation fails explicitly without stdout pollution', () => {
- const home=mkdtempSync(join(tmpdir(),'desktop-cua-missing-'));
- try {
-  const run=spawnSync(process.execPath,[wrapper],{env:{...process.env,CODEX_HOME:home},input:'',encoding:'utf8',timeout:10000});
-  assert.equal(run.status,1);
-  assert.equal(run.stdout,'');
-  assert.match(run.stderr,/Start ChatGPT Desktop/);
- } finally {rmSync(home,{recursive:true,force:true});}
+test('a backend root that exits early takes the descendant holding its output with it', { skip: process.platform !== 'win32' }, async t => {
+  const { home, remove } = codexHome();
+  const c = connect({ env: testEnv(home) });
+  t.after(async () => { await c.close(); remove(); });
+  await c.initialize();
+  const { helper } = await c.json('orphan');
+  assert.ok(await gone(helper), 'descendant survived its root');
+  // A call may still reach the exiting runtime; the next one runs on a new runtime.
+  let result = await c.js('state');
+  if (result.isError) result = await c.js('state');
+  assert.match(result.content[0].text, /"seen":\["state"\]/);
 });
